@@ -1,1 +1,18 @@
+# secrets
 .env
+
+# pipeline outputs
+out/
+.hamilton_cache/
+
+# codebase-memory artifacts
+.codebase-memory/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/

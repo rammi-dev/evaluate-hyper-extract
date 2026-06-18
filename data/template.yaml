@@ -1,0 +1,89 @@
+language: [en]
+
+name: plant_equipment
+type: graph
+tags: [industry, equipment, evaluation]
+
+description:
+  en: 'Plant equipment graph - extract assets with tag, type, scope, description, and
+    evidence for entity-resolution evaluation. The identifier key is the raw name, so
+    the library fragments variant-named assets (the phenomenon under study).'
+
+output:
+  description:
+    en: 'Equipment assets and the relations between them.'
+  entities:
+    description:
+      en: 'Physical equipment assets mentioned in the text.'
+    fields:
+      - name: name
+        type: str
+        description:
+          en: 'Asset tag or designation exactly as written in the text. Do NOT normalize.'
+        required: true
+      - name: type
+        type: str
+        description:
+          en: 'Equipment type, e.g. pump / tank / valve / compressor.'
+        required: true
+      - name: scope
+        type: str
+        description:
+          en: 'Plant, unit, or area the asset belongs to, if stated (e.g. Unit 2).'
+        required: false
+      - name: description
+        type: str
+        description:
+          en: 'One short line on the asset role or function.'
+        required: false
+      - name: evidence
+        type: str
+        description:
+          en: 'The source sentence in which the asset was mentioned.'
+        required: false
+  relations:
+    description:
+      en: 'Explicit relations between assets.'
+    fields:
+      - name: source
+        type: str
+        description:
+          en: 'Source asset name, matching an extracted asset.'
+        required: true
+      - name: target
+        type: str
+        description:
+          en: 'Target asset name, matching an extracted asset.'
+        required: true
+      - name: type
+        type: str
+        description:
+          en: 'Relation type, e.g. feeds / connected_to / controls / located_in.'
+        required: true
+
+guideline:
+  target:
+    en: 'You extract plant equipment assets and the relations between them, for an
+      entity-resolution evaluation.'
+  rules_for_entities:
+    en:
+      - 'Extract each asset with its tag exactly as written; do NOT normalize or merge tags.'
+      - 'Record the equipment type and the plant/unit (scope) when stated.'
+      - 'Include the source sentence as evidence.'
+  rules_for_relations:
+    en:
+      - 'Only extract relations explicitly stated in the text.'
+
+identifiers:
+  entity_id: name
+  relation_id: '{source}|{type}|{target}'
+  relation_members:
+    source: source
+    target: target
+
+options:
+  extraction_mode: one_stage
+
+display:
+  entity_label: '{name}'
+  relation_label: '{type}'

@@ -16,26 +16,48 @@ plain string-equality `==`). Graph topology is decided entirely by job 3.
 **Do not try to "fix" this inside the library** — the harness's whole purpose is
 to show the fragmentation and then unify externally.
 
-### A.2 ontomem internals (verified, v0.2.3)
+### A.2 ontomem internals (verified against indexed source)
 
-- Matching lives in `ontomem/merger/base.py` → `_group_by_key`, which buckets
-  items with `defaultdict[key_extractor(item)]`. Items merge **only when their
-  key string is byte-equal**. That dict lookup *is* the `==`.
-- For the graph templates the node `key_extractor` is `lambda x: x.name` (e.g.
-  `hyperextract/methods/typical/kg_gen.py:129`, `itext2kg.py:149`,
-  `itext2kg_star.py:163`, `atom.py:356`, `methods/rag/hyper_rag.py:155`). Edge
-  key is `"{source}|{type}|{target}"`-style. So node identity = the raw `name`
-  string, unnormalized.
-- The **7 merge strategies** (`MERGE_FIELD`, `KEEP_INCOMING`, `KEEP_EXISTING`,
-  `LLM.BALANCED`, `LLM.PREFER_INCOMING`, `LLM.PREFER_EXISTING`,
-  `LLM.CUSTOM_RULE`) are all **field-fusion-after-match**. None of them performs
-  matching. Switching strategy changes *how* fields fuse, never *what* is
-  considered the same.
-- The `embedder` passed to `OMem` is used **only** for `build_index` / search
-  (FAISS). It is **not** used in `add()` or in matching. Configuring an embedder
-  does not make identity semantic.
-- Merge runs as a tournament (log-depth, batched, concurrent field-fusion). It is
-  a latency/parallelism optimization, not a token-cost reduction, and not ER.
+- `ontomem` is a **separate installed package** (indexed as
+  `home-rami-Work-tmp-ontomem`), *not* a Hyper-Extract subdirectory.
+- Matching lives in `ontomem/merger/base.py` → `BaseMerger._group_by_key` (a
+  **method**, not a module-level function), which buckets items with
+  `defaultdict[key_extractor(item)]`. Items merge **only when their key string is
+  byte-equal**. That dict bucketing *is* the `==`. The surrounding
+  `BaseMerger._cross_key_tournament_merge` is an O(log n) batched **field-fusion**
+  of items the key already declared identical — not matching.
+- The node `key_extractor` is **not hardcoded** to `lambda x: x.name`.
+  `AutoGraph.__init__` takes `node_key_extractor` / `edge_key_extractor` as
+  **required parameters**; `TemplateFactory.create_graph` derives them from the
+  chosen template's **`identifiers`** YAML block via `parse_identifiers` →
+  `_extractor` (`hyperextract/utils/template_engine/parsers/identifiers.py`). A
+  plain field `name` → `lambda x: str(x.name)`; a bracket template `{name}|{type}`
+  → an f-string composite key. So node identity = whatever the template's
+  `identifiers.entity_id` expression names (defaults to `name` in presets that say so),
+  unnormalized. **The template `identifiers` block is the precise definition of
+  what the library treats as "the same."**
+- **Two construction paths (verified in index).** The `methods/*` algorithm entry
+  points (`methods/typical/{kg_gen,itext2kg,itext2kg_star,atom}.py`,
+  `methods/rag/{hyper_rag,cog_rag,light_rag,...}.py`) **hardcode**
+  `node_key_extractor=lambda x: x.name` (e.g. `kg_gen.py:129`, `itext2kg.py:149`,
+  `atom.py:356`, `hyper_rag.py:155`). Only `TemplateFactory.create_graph` is
+  `identifiers`-configurable. The harness uses `TemplateFactory` to control both the
+  key and an enriched entity schema (design §2.3).
+- The merge strategies (`MERGE_FIELD`, `KEEP_INCOMING`, `KEEP_EXISTING`,
+  `LLM.BALANCED`, `LLM.PREFER_INCOMING`, `LLM.PREFER_EXISTING`, `LLM.CUSTOM_RULE`;
+  classic mergers in `ontomem/merger/classic_merger/`, LLM mergers in
+  `ontomem/merger/llm_merger/`) are all **field-fusion-after-match** — each only
+  implements `pair_merge`/`batch_merge`. None performs matching. `AutoGraph`
+  defaults both node and edge mergers to `MergeStrategy.LLM.BALANCED`. Switching
+  strategy changes *how* fields fuse, never *what* is considered the same.
+- The `embedder` passed to `OMem`/`AutoGraph` is used **only** for
+  `build_index` / search (FAISS). It is **not** used in `add()` or in matching.
+  Configuring an embedder does not make identity semantic → the harness may pass a
+  local `HuggingFaceEmbeddings` and use the *same* instance for the external
+  resolver.
+- Merge runs as a cross-key tournament (log-depth, batched field-fusion). The
+  cross-key batching reduces the *number* of LLM merge calls by orders of magnitude
+  (per the `BaseMerger` docstring) — a latency/call-count optimization, not ER.
 
 ### A.3 Hyper-Extract usage facts
 
@@ -97,7 +119,8 @@ to show the fragmentation and then unify externally.
 
 - OpenRouter is **OpenAI-compatible chat completions only** — no embeddings
   endpoint. Use `langchain_openai.ChatOpenAI(model=..., base_url=
-  "https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY, temperature=0)`.
+  "https://openrouter.ai/api/v1", api_key=os.environ["OPEN_ROUTER_KEY"],
+  temperature=0)`. Key loaded from `.env` (var name `OPEN_ROUTER_KEY`).
 - Embeddings are **local**: `langchain_huggingface.HuggingFaceEmbeddings(
   model_name="BAAI/bge-m3")` (wraps sentence-transformers; ~2 GB first load;
   `BAAI/bge-small-en-v1.5` is the faster English fallback).
@@ -125,19 +148,27 @@ to show the fragmentation and then unify externally.
 Do these as 1–2 minute checks against the installed packages; do not open-ended
 research them.
 
-1. **Hyper-Extract graph construction signature.** Inspect how to build a graph
-   extractor and pass an LLM + embedder: check `hyperextract.create_client` and
-   the graph `Template`/`AutoGraph` constructor. If it won't accept a custom
-   `base_url`/`api_key` or a prebuilt `ChatOpenAI`, fall back to env vars
-   (`OPENAI_BASE_URL`, `OPENAI_API_KEY`). Confirm by printing one extracted node.
-2. **Chosen graph template id + output schema.** List installed templates; pick
-   one whose schema is `entities` + `relations`; print one raw node to confirm
-   field names (`name`, `type`, `description`).
+1. **Graph construction — RESOLVED (verified in source).** `AutoGraph.__init__`
+   (`hyperextract/types/graph.py`) accepts **prebuilt** `llm_client: BaseChatModel`
+   and `embedder: Embeddings`. Build them in the harness
+   (`ChatOpenAI(base_url="https://openrouter.ai/api/v1", api_key=…)` +
+   local `HuggingFaceEmbeddings`) and pass them straight in — do **not** use
+   `create_client`/`create_embedder` (those are API-spec factories that can't serve
+   OpenRouter embeddings). The factory path is
+   `TemplateFactory.create_graph(config, llm_client, embedder)`. Only residual check:
+   print one extracted node to confirm fields.
+2. **Template + identifiers key — mostly RESOLVED.** Templates are YAML presets
+   under `hyperextract/templates/presets/` (e.g. `industry/`); a template's `output`
+   defines the entity/relation schema and `identifiers.entity_id` defines the match key
+   (see A.2). Residual checks: pick/author one whose `output` is entities+relations,
+   print one raw node to confirm field names (`name`, `type`, …), and **record the
+   resolved `identifiers.entity_id` expression** — the baseline must be keyed by it, not
+   an assumed `name`.
 3. **`BaseDefaultValidator` interface** (only if using `@check_output_custom`).
    Otherwise use in-node `assert` for the hard gates — no check needed.
 4. **`mlflow` autolog flavor** for the client path: `mlflow.langchain.autolog()`
    vs `mlflow.openai.autolog()`. Pick whichever traces the actual `ChatOpenAI`
    calls.
 5. **Current cheap OpenRouter model id** for `config.LLM_MODEL`: confirm one is
-   live on openrouter.ai/models (e.g. `google/gemini-2.0-flash-001`,
+   live on openrouter.ai/models (e.g. `google/gemini-2.5-flash`,
    `openai/gpt-4o-mini`). The `checked_llm` gate fails fast if the id is wrong.

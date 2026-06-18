@@ -1,0 +1,44 @@
+[project]
+name = "evaluate-hyper-extract"
+version = "0.1.0"
+description = "Harness to measure Hyper-Extract fragmentation and resolve entities externally (Hamilton + local MLflow)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "apache-hamilton[visualization]",
+    "mlflow",
+    "langchain-openai",
+    "langchain-huggingface",
+    "sentence-transformers",
+    "numpy",
+    "matplotlib",
+    "python-dotenv",
+    "pyvis",
+    "hyperextract",
+    "ontomem",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+# Use the local checkouts that are indexed in codebase-memory, not PyPI.
+[tool.uv.sources]
+hyperextract = { path = "/home/rami/Work/tmp/Hyper-Extract", editable = true }
+ontomem = { path = "/home/rami/Work/tmp/ontomem", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eval_hyper_extract"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs OPEN_ROUTER_KEY and network/model download (deselected by default)",
+]
+# Default run = unit only. Integration tests opt in with: uv run pytest -m integration
+addopts = "-m 'not integration'"

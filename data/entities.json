@@ -1,0 +1,8 @@
+{
+  "canonical_entities": [
+    {"id": "pump_p101", "canonical_name": "P-101", "type": "pump", "scope": "Unit 2", "variants": ["P-101", "P 101", "P101", "the feedwater pump"]},
+    {"id": "pump_p102", "canonical_name": "P-102", "type": "pump", "scope": "Unit 1", "variants": ["P-102", "the cooling pump"]},
+    {"id": "tank_t200", "canonical_name": "T-200", "type": "tank", "scope": "Unit 2", "variants": ["T-200", "the storage tank"]}
+  ],
+  "lookalike_pairs": [["pump_p101", "pump_p102"]]
+}

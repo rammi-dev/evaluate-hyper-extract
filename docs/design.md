@@ -37,8 +37,10 @@ across items). It is to:
 
 1. Run the library as-is and **measure** the fragmentation it produces.
 2. Run an **external entity-resolution pass** on the dumped nodes
-   (embed → candidate → LLM-verify → cluster).
-3. **Score both** against a ground-truth manifest and show the delta.
+   (embed → candidate → LLM-verify → cluster) in three modes — **offline (batch)**,
+   **online (incremental, semantic)**, and **hybrid** — to compare accuracy vs
+   freshness vs order-dependence (§4).
+3. **Score all** against a ground-truth manifest and show the delta.
 4. Do all of it as a **Hamilton DAG** with a **validation gate on every node** and
    **local, venv-only MLflow** observability, so configs can be swept and compared.
 
@@ -93,6 +95,16 @@ registered as a lookalike pair.
 
 ### 2.3 Extraction template — enriched entity schema (the right use of "hints")
 
+**Construction path (decision).** Hyper-Extract offers two ways to build a graph:
+(a) the `methods/*` algorithm entry points (`kg_gen`, `itext2kg`, `itext2kg_star`,
+`atom`, `hyper_rag`, `cog_rag`, `light_rag`) — which **hardcode**
+`node_key_extractor=lambda x: x.name` and ship fixed schemas; and (b)
+`TemplateFactory.create_graph(config, llm_client, embedder)` — where the key and the
+entity schema come from a template YAML. **We use path (b)** because we need the
+enriched `output` schema (below) for the resolver *and* explicit control of the
+`identifiers` key. (Path (a) would also demonstrate fragmentation — key is literally
+`name` — but gives us no `scope`/`evidence` fields to resolve with.)
+
 The template's `identifiers` block is configurable, which tempts a "smarter" match
 key like `{name}|{type}|{scope}`. **Do not** — a composite key is *still* string
 equality; it only relocates the failure (more key fields → worse fragmentation,
@@ -105,20 +117,35 @@ the match key — they feed the external resolver (§4), where an LLM can actual
 *reason* about identity:
 
 ```yaml
-# data/template.yaml  (or a chosen preset under hyperextract/templates/presets/)
-identifiers:
-  entity: name            # keep the library key SIMPLE — it only buckets
+# data/template.yaml — real hyperextract schema (verified against load_template)
+language: [en]
+name: plant_equipment
+type: graph
 output:
-  entity:
-    name: ...             # surface form, exactly as written (do NOT normalize)
-    type: ...             # pump / valve / tank
-    scope: ...            # plant / unit / area — the namespace that splits lookalikes
-    description: ...       # one line of role/context
-    evidence: ...          # the source sentence (provenance)
-guideline: >
-  Extract each asset with its tag exactly as written, its equipment type, and the
-  plant/unit it belongs to if stated. Do not normalize or merge tags.
+  entities:
+    fields:                 # the enriched entity schema
+      - {name: name, type: str, required: true}        # surface form, do NOT normalize
+      - {name: type, type: str, required: true}        # pump / valve / tank
+      - {name: scope, type: str}                       # plant / unit / area — splits lookalikes
+      - {name: description, type: str}                 # one line of role/context
+      - {name: evidence, type: str}                    # the source sentence (provenance)
+  relations:
+    fields:
+      - {name: source, type: str, required: true}
+      - {name: target, type: str, required: true}
+      - {name: type, type: str, required: true}
+identifiers:
+  entity_id: name           # keep the library key SIMPLE — it only buckets
+  relation_id: '{source}|{type}|{target}'
+guideline:
+  rules_for_entities:
+    en: ['Extract each asset with its tag exactly as written; do not normalize or merge tags.']
 ```
+
+(Field `description`/`guideline` values are multilingual maps `{en: ...}` in the real
+schema; abbreviated here. The match key is `identifiers.entity_id`, loaded via
+`hyperextract...loader.load_template`; the graph is built with
+`Template.create(path, "en", llm, embedder)`.)
 
 `type`/`scope`/`description`/`evidence` do two jobs in the resolver, *neither* being
 "be the key": (1) **disambiguation signal** for the verifier (it sees
@@ -126,7 +153,7 @@ guideline: >
 **separation in embedding space** (`P-101 | pump | Unit 2` and `P-101 | pump | Plant B`
 embed apart → fewer false candidates; `P-101` and `the feedwater pump` embed closer
 → better recall). This is "identify them more precisely" done where intelligence
-can live. `identifiers.entity` (`name` vs `{name}|{scope}`) becomes a **swept
+can live. `identifiers.entity_id` (`name` vs `{name}|{scope}`) becomes a **swept
 config** (§8), not a fix.
 
 ## 3. Pipeline architecture (Hamilton DAG)
@@ -143,27 +170,28 @@ combined `dr.execute([...])` per configuration = one MLflow run.
 | `clients_module` | LLM client (OpenRouter `ChatOpenAI`) + local embedder, each behind a fail-fast gate |
 | `corpus_module` | load `data/corpus/*.md` + `data/entities.json` |
 | `extract_module` | build `AutoGraph` from the template, feed corpus → dumped `{nodes, edges}`; also expose the template's resolved `identifiers` key expression |
-| `resolve_module` | external ER: embed → candidate → verify → cluster → rewritten graph |
+| `resolve_module` | external ER: shared embed→candidate→verify, then mode-dispatched cluster (`offline`/`online`/`hybrid`) → rewritten graph |
 | `metrics_module` | thin scalar nodes (recall/precision/F1/counts/gate) for auto-log |
+| `viz_module` | `render_graph(nodes, edges) -> html` — reusable KG visualization for raw/resolved/online/hybrid graphs |
 | `report_module` | artifacts: viz, fragmentation table, markdown report, `mlflow.log_*` |
 
 ### 3.2 Node table (transcribe each row to a function + in-node gate)
 
 | node | depends on | returns | validation gate |
 |---|---|---|---|
-| `config` | (inputs) | `Config` | required keys present; `tau_candidate ∈ (0,1]` |
+| `config` | (inputs) | `Config` | required keys present; `tau_candidate ∈ (0,1]`; `resolution_mode ∈ {offline,online,hybrid}` |
 | `checked_llm` | `config` | `ChatOpenAI` | 1-token ping succeeds (bad model id / key fails here) |
 | `checked_embedder` | `config` | `Embeddings` | embeds a probe string → non-empty vector |
 | `corpus_docs` | `config` | `list[Doc]` | ≥1 doc, all non-empty UTF-8 |
 | `ground_truth` | `config` | `GroundTruth` | ≥1 canonical entity **and** ≥1 lookalike pair |
-| `template` | `config` | `TemplateCfg` | `output` has entities+relations; `identifiers.entity` present |
+| `template` | `config` | `TemplateCfg` | `output` has entities+relations; `identifiers.entity_id` present |
 | `library_key` | `template` | `str` | the resolved key expr (e.g. `name`, `{name}\|{scope}`) — echoed as a param |
 | `raw_graph` | `checked_llm`, `checked_embedder`, `corpus_docs`, `template` | `Graph` | **non-empty** nodes & edges (extraction sanity) |
 | `raw_metrics` | `raw_graph`, `library_key`, `ground_truth` | `Metrics` | baseline fragmentation **keyed by `library_key`**, not an assumed `name` |
 | `node_embeddings` | `raw_graph`, `checked_embedder` | `ndarray` | rows == node count; no NaNs |
-| `candidate_pairs` | `node_embeddings`, `config` | `list[Pair]` | all sims ∈ [-1,1]; candidates ⊆ all-pairs |
+| `candidate_pairs` | `node_embeddings`, `config` | `list[Pair]` | all sims ∈ [-1,1]; candidates ⊆ all-pairs (offline) |
 | `verified_pairs` | `candidate_pairs`, `checked_llm` | `list[Pair]` | each verdict ∈ {same, different} + reason |
-| `clusters` | `raw_graph`, `verified_pairs` | `list[Cluster]` | partition covers every node exactly once |
+| `clusters` | mode-dispatched (`@config.when resolution_mode`): **offline** `raw_graph`,`verified_pairs`; **online/hybrid** `raw_graph`,`node_embeddings`,`checked_llm`,`ingest_order`,`config` | `list[Cluster]` | partition covers every node exactly once |
 | `resolved_graph` | `raw_graph`, `clusters` | `Graph` | no self-edges; every edge endpoint ∈ node ids |
 | `resolved_metrics` | `resolved_graph`, `clusters`, `ground_truth` | `Metrics` | **HARD: no lookalike pair co-clustered** |
 | `recall` / `precision` / `f1` | `resolved_metrics` | `float` | scalar (auto-logs as metric) |
@@ -175,35 +203,90 @@ The `resolved_metrics` lookalike assert is the **primary hard gate**: a failing
 node raises and halts downstream — a run that over-merges a known-distinct pair
 cannot silently report a good F1.
 
-## 4. The external resolver (resolve_module) — definitive algorithm
+`resolution_mode` selects the `clusters` implementation via `@config.when` (one
+driver build per mode); `ingest_order` is a plain input (a permutation seed for
+online/hybrid, ignored by offline). Both are also surfaced as MLflow params/tags so
+each `(mode, order)` run is comparable in the UI.
+
+## 4. The external resolver (resolve_module) — shared signal + three modes
 
 Operates on `raw_graph` nodes (`name`, `type`, `scope`, `description`, `evidence`
-per §2.3). This is the **blocking → candidate → verify → cluster** record-linkage
-pattern: embeddings buy recall, the LLM is the precision backstop.
+per §2.3) via the **blocking → candidate → verify → cluster** record-linkage
+pattern: embeddings buy recall, the LLM is the precision backstop. The first three
+steps are **shared by every mode**; the modes differ only in *how they cluster*.
+
+### 4.0 Shared signal (all modes)
 
 0. **Record the library's key** (`library_key`) so the baseline (§5) is scored
-   against *how the library actually bucketed*, not an assumed `name`. The resolver
-   then re-clusters those buckets semantically.
+   against *how the library actually bucketed*, not an assumed `name`.
 1. **Embed** `f"{name} | {type} | {scope} | {description}"` per node with the local
    embedder. The enriched context (not the match key) gives the verifier
    disambiguating signal *and* pushes lookalikes apart in vector space while pulling
    true variants together.
-2. **Candidate generation** — pairwise cosine (corpus is tiny; kNN if it grows).
-   Candidate iff `sim >= tau_candidate` (default **0.55**, biased to recall).
-3. **LLM verify** each candidate: strict `same: yes/no` + `reason`, **with both
+2. **Candidate generation** — cosine similarity; candidate iff `sim >= tau_candidate`
+   (default **0.55**, biased to recall).
+3. **LLM verify** a candidate pair: strict `same: yes/no` + `reason`, **with both
    nodes' `type`/`scope`/`evidence` in the prompt**. The prompt **must state** that
-   differing equipment tag numbers (`P-101` vs `P-102`) denote different physical
-   assets and that a differing `scope` (plant/unit) means distinct assets even when
-   the tag matches. Keep only `same == True`. `temperature=0`; cacheable.
-4. **Cluster** — connected components over confirmed-same pairs; singletons kept.
-5. **Fuse** — per cluster pick the canonical name (most specific / tag-bearing),
-   union descriptions, **redirect every edge `source`/`target` to the canonical
-   id**, drop self-edges, dedupe edges → `out/resolved_graph.json`.
-6. **Score** vs `entities.json` (§5).
+   differing tag numbers (`P-101` vs `P-102`) denote different physical assets and
+   that a differing `scope` (plant/unit) means distinct assets even when the tag
+   matches. `temperature=0`; cacheable.
+
+Then **fuse** (per cluster: canonical name = most specific/tag-bearing, union
+descriptions, **redirect every edge `source`/`target` to the canonical id**, drop
+self-edges, dedupe → `out/resolved_graph.json`) and **score** vs `entities.json`
+(§5). Fuse + score are identical across modes; only clustering differs.
 
 Why not pure vectors: `P-101`/`P-102` embed as near-identical but are distinct
 (vector over-merges); `P-101`/`the feedwater pump` embed far apart but are the same
 (vector under-merges). The LLM resolves both; embeddings only *propose*.
+
+### 4.1 Offline (batch) — the default, order-independent
+
+Candidate-generate over **all** node pairs, verify each, then take **connected
+components** over confirmed-same pairs (singletons kept). Sees the whole pile →
+global, transitive, **order-independent** clustering. Highest accuracy; the headline
+"after". Selected by `resolution_mode="offline"`.
+
+### 4.2 Online (incremental, semantic) — order-dependent
+
+Process nodes **one at a time in `ingest_order`**, maintaining committed clusters:
+for each incoming node, candidate-match it against the **clusters-so-far** (compare
+to each cluster's representative embedding), LLM-verify against the best candidate,
+then **link** (merge in, update representative) or **mint** a new cluster — decision
+committed immediately. Fresh and low-latency, but **greedy and order-dependent**: an
+early wrong link entrenches and is never revisited. Selected by
+`resolution_mode="online"`. This is the only mode that exhibits the
+order-dependence the reference warns about — `==` matching does **not** (byte-equal
+keys bucket deterministically regardless of order).
+
+### 4.3 Hybrid — online freshness + offline reconciliation
+
+Run **online** (4.2) for the incremental graph, then run an **offline reconciliation
+pass** (4.1 connected-components) over the online clusters' members to repair
+path-dependence and recover global structure. Converges to ≈the offline result while
+modelling what mature systems do (Graphiti, Senzing). Selected by
+`resolution_mode="hybrid"`.
+
+### 4.4 The library's native online-`==` — the raw baseline
+
+ontomem's own `add()` is *already* an online/incremental matcher, but with `==`
+(`defaultdict[key]`). It produces `raw_graph` — our "before". Crucially its **topology
+is order-independent** (keys bucket the same in any order); only field-*fusion* values
+can vary by order. So it is the deterministic, fragmented floor every semantic mode is
+compared against — not a fourth resolver we build.
+
+### 4.5 Mode comparison (the experiment)
+
+| mode | clustering | order-dependent? | role |
+|---|---|---|---|
+| online-`==` (library) | `defaultdict[key]` | no (topology) | raw baseline ("before") |
+| **online-semantic** | greedy link/mint vs clusters-so-far | **yes** | freshness, path-dependence demo |
+| **offline-semantic** | connected components (global) | no | accuracy ceiling ("after") |
+| **hybrid** | online then offline reconcile | no (post-reconcile) | freshness + correction |
+
+The defining property test (§ plan T12/T13): feed the same mentions in **two
+`ingest_order`s** → online-semantic yields **different** clusters, offline yields
+**identical** clusters, and hybrid **converges** to the offline result.
 
 ## 5. Metrics (metrics_module)
 
@@ -261,10 +344,14 @@ Each configuration = one `dr.execute` = one MLflow run. Swept knobs (all surface
 via `config`/`inputs`, so auto-logged as params):
 
 - `tau_candidate` — candidate cosine threshold (e.g. 0.45 / 0.55 / 0.65).
-- `llm_model` — OpenRouter id (e.g. `google/gemini-2.0-flash-001`,
+- `llm_model` — OpenRouter id (e.g. `google/gemini-2.5-flash`,
   `openai/gpt-4o-mini`).
 - `embed_model` — `BAAI/bge-m3` (default) vs `BAAI/bge-small-en-v1.5` (faster).
-- `library_key` — the template's `identifiers.entity`: `name` vs the composite
+- `resolution_mode` — `offline` / `online` / `hybrid` (§4). Compare accuracy
+  (offline ≥ hybrid ≥ online) against freshness on the same metrics.
+- `ingest_order` — permutation seed; sweeping ≥2 orders exposes online's
+  order-dependence and offline/hybrid's stability.
+- `library_key` — the template's `identifiers.entity_id`: `name` vs the composite
   `{name}|{scope}`. This is a *baseline* lever (cheap blocking against the
   cross-scope over-merge at extraction time), **not** a resolution mechanism — it
   does nothing for fragmentation and is brittle on `scope` extraction. The sweep
@@ -307,8 +394,9 @@ evaluate-hyper-extract/
 │   ├── clients_module.py
 │   ├── corpus_module.py
 │   ├── extract_module.py      # Hyper-Extract → raw_graph dump
-│   ├── resolve_module.py      # external ER pass
+│   ├── resolve_module.py      # external ER: shared signal + offline/online/hybrid clustering
 │   ├── metrics_module.py
+│   ├── viz_module.py          # render_graph(nodes, edges) -> html
 │   ├── report_module.py
 │   └── run.py                 # builds the driver, executes, one run per config
 ├── out/                       # mlflow.db, mlartifacts/, graph/, resolved_graph.json, *.html
@@ -319,8 +407,10 @@ evaluate-hyper-extract/
 ## 11. Dependencies (`uv add`)
 
 `apache-hamilton[visualization]` (+ system `graphviz` for PNG), `mlflow`,
-`langchain-openai`, `langchain-huggingface` (sentence-transformers), `hyperextract`
-/ `ontomem`, `numpy`, `python-dotenv`. Secret via `.env`: `OPEN_ROUTER_KEY`.
+`langchain-openai`, `langchain-huggingface` + **`sentence-transformers`** (the latter
+is not pulled transitively — add it explicitly), `hyperextract`
+/ `ontomem`, `numpy`, `python-dotenv`, `pyvis` (KG visualization, §viz_module).
+Secret via `.env`: `OPEN_ROUTER_KEY`.
 
 ## 12. Build order
 
@@ -339,5 +429,11 @@ evaluate-hyper-extract/
 - Raw graph demonstrably **fragmented** (`raw` recall low, `raw_node_count` high).
 - Resolved graph: recall ↑ materially, `resolved_node_count` ↓, **precision holds**.
 - **`lookalike_preserved == 1`** on the chosen run (hard gate never tripped).
+- **Resolution-mode story holds:** offline is order-independent (same clusters
+  across `ingest_order`s); online is order-dependent (clusters differ); hybrid
+  converges to ≈offline after reconciliation. Accuracy order: offline ≥ hybrid ≥
+  online ≥ raw.
+- A **simple KG visualization** renders for the raw and resolved graphs (HTML
+  artifact), making the before/after collapse inspectable.
 - Every node has a gate; every config is one comparable MLflow run with params,
   metrics, viz, fragmentation table, and verifier traces attached.

@@ -1,0 +1,17 @@
+{
+  "nodes": [
+    {"id": "P-101", "name": "P-101", "type": "pump", "scope": "Unit 2", "description": "feedwater pump", "evidence": "Pump P-101 supplies the boiler in Unit 2."},
+    {"id": "P 101", "name": "P 101", "type": "pump", "scope": "Unit 2", "description": "feed water pump", "evidence": "P 101 was serviced last week."},
+    {"id": "P101", "name": "P101", "type": "pump", "scope": "Unit 2", "description": "pump", "evidence": "P101 tripped on high vibration."},
+    {"id": "the feedwater pump", "name": "the feedwater pump", "type": "pump", "scope": "Unit 2", "description": "feedwater pump", "evidence": "The feedwater pump runs continuously."},
+    {"id": "P-102", "name": "P-102", "type": "pump", "scope": "Unit 1", "description": "cooling water pump", "evidence": "Pump P-102 cools Unit 1."},
+    {"id": "T-200", "name": "T-200", "type": "tank", "scope": "Unit 2", "description": "storage tank", "evidence": "Tank T-200 stores condensate."},
+    {"id": "the storage tank", "name": "the storage tank", "type": "tank", "scope": "Unit 2", "description": "storage tank", "evidence": "The storage tank is full."}
+  ],
+  "edges": [
+    {"source": "P-101", "target": "T-200", "relation": "feeds"},
+    {"source": "the feedwater pump", "target": "the storage tank", "relation": "feeds"},
+    {"source": "P101", "target": "P101", "relation": "inspected_with"},
+    {"source": "P-102", "target": "T-200", "relation": "feeds"}
+  ]
+}
