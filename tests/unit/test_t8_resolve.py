@@ -15,13 +15,13 @@ from eval_hyper_extract.resolve_module import (
     connected_components,
     build_clusters,
     candidate_pairs,
-    clusters__offline,
+    clusters as cluster_offline,
     confirm_pairs,
     embed_nodes,
     node_embeddings,
-    resolved_graph,
     rewrite_graph,
 )
+from eval_hyper_extract.report_module import resolved_graph
 from eval_hyper_extract.schema import Cluster, Graph, GroundTruth
 
 
@@ -115,7 +115,7 @@ def test_offline_end_to_end(mini_graph: Graph, fake_embedder, ground_truth: Grou
     ne = node_embeddings(mini_graph, fake_embedder)
     cands = candidate_pairs(ne, 0.55)
     confirmed = confirm_pairs(cands, {n.id: n for n in mini_graph.nodes}, _oracle(ground_truth))
-    clusters = clusters__offline(mini_graph, confirmed)
+    clusters = cluster_offline(mini_graph, confirmed)
     g = resolved_graph(mini_graph, clusters)
 
     assert len(g.nodes) == 3  # the collapse: 7 -> 3
@@ -125,7 +125,7 @@ def test_offline_end_to_end(mini_graph: Graph, fake_embedder, ground_truth: Grou
 
 def test_clusters_offline_partition_gate(mini_graph: Graph) -> None:
     # no confirmed pairs → all singletons, still a valid partition
-    clusters = clusters__offline(mini_graph, [])
+    clusters = cluster_offline(mini_graph, [])
     assert len(clusters) == len(mini_graph.nodes)
 
 

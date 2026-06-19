@@ -80,6 +80,38 @@ def score(nodes: list[Node], clusters: list[Cluster], gt: GroundTruth) -> Metric
     )
 
 
+def bcubed(nodes: list[Node], clusters: list[Cluster], gt: GroundTruth) -> tuple[float, float, float]:
+    """Entity-level B-cubed precision/recall/F1 (the partition quality, not just pairs).
+
+    Per labeled node i: precision = |cluster(i) ∩ gold(i)| / |cluster(i)|, recall =
+    |cluster(i) ∩ gold(i)| / |gold(i)| (over labeled nodes); averaged over all i.
+    """
+    label = node_label_map(nodes, gt)
+    assign = _assignment(clusters)
+    labeled = [nid for nid, lab in label.items() if lab is not None]
+    if not labeled:
+        return 1.0, 1.0, 1.0
+
+    cluster_members: dict[int | None, set[str]] = defaultdict(set)
+    gold_members: dict[str, set[str]] = defaultdict(set)
+    for nid in labeled:
+        cluster_members[assign.get(nid)].add(nid)
+        gold_members[label[nid]].add(nid)
+
+    precisions, recalls = [], []
+    for nid in labeled:
+        cm = cluster_members[assign.get(nid)]
+        gm = gold_members[label[nid]]
+        inter = len(cm & gm)
+        precisions.append(inter / len(cm))
+        recalls.append(inter / len(gm))
+
+    bp = sum(precisions) / len(precisions)
+    br = sum(recalls) / len(recalls)
+    bf = 0.0 if (bp + br) == 0 else 2 * bp * br / (bp + br)
+    return bp, br, bf
+
+
 def _eval_key(expr: str, node: Node) -> str:
     """Mirror of hyperextract `_extractor`: simple field or `{a}|{b}` composite."""
     if "{" in expr:

@@ -13,9 +13,10 @@ from eval_hyper_extract.schema import Cluster, Graph, GroundTruth
 
 __all__ = [
     "Metrics", "library_clusters", "score",
-    "raw_metrics", "resolved_metrics",
+    "raw_metrics", "resolved_metrics", "is_disqualified",
     "raw_recall", "raw_precision", "raw_f1",
     "recall", "precision", "f1", "raw_node_count", "resolved_node_count", "lookalike_preserved",
+    "bcubed_scores", "b3_precision", "b3_recall", "b3_f1", "llm_calls",
 ]
 
 
@@ -25,13 +26,17 @@ def raw_metrics(raw_graph: Graph, library_key: str, ground_truth: GroundTruth) -
 
 
 def resolved_metrics(raw_graph: Graph, clusters: list[Cluster], ground_truth: GroundTruth) -> Metrics:
-    """Score the resolved clustering; HARD GATE: no lookalike pair co-clustered."""
-    m = metrics.score(raw_graph.nodes, clusters, ground_truth)
-    assert m.lookalike_preserved, (
-        "HARD GATE failed: a lookalike pair was co-clustered "
-        f"(lookalike_pairs={ground_truth.lookalike_pairs})"
-    )
-    return m
+    """Score the resolved clustering. The look-alike check is the `lookalike_preserved`
+    metric (0/1), used to **disqualify** a run at assessment time (`is_disqualified`) —
+    not a crash, so a resolver that over-merges (e.g. Splink on tiny data) still produces
+    a comparable MLflow row that shows it failed."""
+    return metrics.score(raw_graph.nodes, clusters, ground_truth)
+
+
+def is_disqualified(resolved_metrics: Metrics) -> bool:
+    """Assessment gate (design §8): a run that co-clustered a look-alike is disqualified
+    regardless of F1. Use to filter the MLflow runs table; logged as a metric below."""
+    return not resolved_metrics.lookalike_preserved
 
 
 def raw_recall(raw_metrics: Metrics) -> float:
@@ -68,3 +73,24 @@ def resolved_node_count(clusters: list[Cluster]) -> int:
 
 def lookalike_preserved(resolved_metrics: Metrics) -> int:
     return int(resolved_metrics.lookalike_preserved)
+
+
+def bcubed_scores(raw_graph: Graph, clusters: list[Cluster], ground_truth: GroundTruth) -> tuple[float, float, float]:
+    return metrics.bcubed(raw_graph.nodes, clusters, ground_truth)
+
+
+def b3_precision(bcubed_scores: tuple) -> float:
+    return bcubed_scores[0]
+
+
+def b3_recall(bcubed_scores: tuple) -> float:
+    return bcubed_scores[1]
+
+
+def b3_f1(bcubed_scores: tuple) -> float:
+    return bcubed_scores[2]
+
+
+def llm_calls(pair_verdicts: list) -> int:
+    """Cost metric: LLM verifier calls in the resolver — 0 for Splink, N for offline."""
+    return len(pair_verdicts)

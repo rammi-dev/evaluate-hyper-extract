@@ -21,9 +21,10 @@ Check a task off only when its **Tests** pass. Sub-boxes track the gating steps.
 - [x] **T8 — `resolve_module` (offline)** · connected-components · edge redirect · stub verifier
 - [x] **T8.5 — `viz_module`** · `render_graph` writes HTML · raw/resolved
 - [x] **T9 — `report_module`** · artifacts · `mlflow.log_*`
-- [x] **T10 — `run.py` + MLflow adapter** (offline) · real run logged · LLM traces captured · `@config.when` dispatch · DAG renders
+- [x] **T10 — `run.py` + MLflow adapter** (offline) · real run logged · LLM traces captured · separate-flow `build_driver(resolver_module)` · DAG renders
 - [ ] **T10b — driver tests** (DAG asserts, planted over-merge halts at gate) · pending
 - [ ] **T11 — Sweep & assessment** · ≥2 comparable runs · disqualify rule
+- [x] **T11.5 — Splink (Fellegi-Sunter) resolver flow** · runs end-to-end · B-cubed + `llm_calls` + disqualify gate · comparison logged (offline wins both; Splink over/under-merges) · _waterfall artifact still TODO_
 - [ ] **T12 — Online-semantic resolver** · greedy link/mint · **order-dependence** test
 - [ ] **T13 — Hybrid resolver** · online→offline reconcile · **convergence** test
 
@@ -249,9 +250,9 @@ Online/hybrid modes come in T12/T13; this task ships the default and the shared
 machinery they reuse. Connected-components and edge-rewrite logic is deterministic
 and exhaustively tested.
 
-**Deliverables.** `resolve_module.py`: `node_embeddings`, `candidate_pairs`,
-`verified_pairs`, `clusters__offline` (the `@config.when(resolution_mode="offline")`
-impl), `resolved_graph`. A reusable `_verify_pair(llm, a, b)` helper that T12/T13 share.
+**Deliverables.** `resolve_module.py` (the offline flow's resolver): `node_embeddings`,
+`candidate_pairs`, `pair_verdicts`, `verified_pairs`, `clusters`, `resolved_graph`.
+Pure logic in `resolve.py` is reused by the peer resolver modules (splink/online/hybrid).
 
 **Tests.**
 - *unit:* `node_embeddings` with `fake_embedder` → array rows == node count, no NaNs
@@ -351,15 +352,75 @@ rule holds.
 
 ---
 
+## T11.5 — Splink (Fellegi-Sunter) resolver mode — classical comparison baseline
+
+Full drop-in spec: [docs/splink](splink). Sequenced **before** online/hybrid because
+it's a peer of the existing `offline` resolver, not a new paradigm — it answers
+"does the LLM resolver justify its per-call cost and opacity vs principled classical
+ER on this domain?" on the same ground truth, metrics, and MLflow.
+
+**Objective.** Add `resolution_mode="splink"`: an unsupervised Fellegi-Sunter resolver
+(Splink + DuckDB, local/venv-only) that emits the **same `clusters` shape**, so the
+entire shared tail (`resolved_graph` → metrics → viz → report → MLflow) is reused
+unchanged. That shared tail is what makes the comparison apples-to-apples.
+
+**Reconciliation with [docs/splink](splink)** (the doc predates the current code):
+- the doc's `entity_clusters` dispatch node = our **`clusters`** node. We use
+  **separate flows, not in-DAG dispatch**: each resolver is its own module defining a
+  `clusters` node; a flow loads exactly one. The shared tail already exists, so the
+  doc's §1 "refactor first" is **already done**.
+- `extracted_graph` → **`raw_graph`**; `run_one` → **`run`** / `sweep`.
+- cluster type: emit **`list[Cluster]`** (not `list[set]`) — group `unique_id` by
+  `cluster_id`, pick canonical via existing `resolve.canonical_name`, so
+  `resolved_graph` is reused unchanged.
+
+**Deliverables.**
+- `uv add splink` (bundles DuckDB; no server).
+- `resolve_splink.py` (pure logic) + `resolve_splink_module.py` (Hamilton node layer,
+  same logic/node split as resolve): `splink_records` → `splink_linker` (EM-trained) →
+  `splink_pairwise` → `splink_clusters` → a **`clusters` node** (`list[Cluster]`).
+  Run it as its own flow: `run(resolver_module=resolve_splink_module,
+  resolution_mode="splink", match_probability_threshold=0.9)`.
+- `match_probability_threshold` config dim (peer to `tau_candidate`).
+- **Shared comparison metrics** (improve BOTH modes, not just Splink):
+  `bcubed_metrics` (entity-level B-cubed precision/recall/f1 — the partition, not just
+  pairwise) and `llm_calls` scalar (`0` for splink; `len(pair_verdicts)` for offline).
+- Explainability: `out/splink_waterfall.html` + match-weights table logged to MLflow
+  (Splink's analog to the LLM traces).
+
+**Note — validate on bigger data later.** Splink's EM estimates m/u from pairwise
+comparisons; on this 13-node toy corpus the trained weights are *illustrative, not
+trustworthy* (too few pairs). Build and run the flow now, but treat the Splink↔LLM
+comparison as indicative until re-run on a larger corpus. The flow accepts a different
+`corpus_dir` / `entities_path`, so swapping in bigger data needs no code change.
+
+**Tests.**
+- *unit:* `splink_records` one-row-per-node + unique `unique_id` gate; the splink
+  clustering is a **total + disjoint** partition of node ids.
+- *unit:* `bcubed_metrics` exact on `mini_graph` (hand-computed B-cubed); `llm_calls`
+  is `0` on the splink path.
+- *unit:* the splink `clusters` node returns `list[Cluster]` that `resolved_graph` consumes
+  (reuse the T8 shared-tail assertions — no dangling edges, valid partition).
+- *integration:* a `splink` run and an `offline` run both appear as comparable MLflow
+  rows (pairwise + B-cubed + `llm_calls` + `lookalike_preserved`); waterfall attached.
+- *integration (the gate):* the look-alike hard gate holds for splink — TF-adjusted
+  Jaro-Winkler keeps `P-101`/`P-102` in different clusters.
+
+**Residuals (1–2 min, per the doc's appendix):** confirm `predict()`/`cluster_*`
+column names, `comparison_library` class names (`dir(cl)`), and the waterfall accessor.
+
+---
+
 ## T12 — Online-semantic resolver (incremental mode)
 
 **Objective.** The greedy incremental clusterer: process nodes one at a time in
 `ingest_order`, matching each against clusters-so-far and committing link/mint
 immediately. Exhibits the **order-dependence** the reference describes.
 
-**Deliverables.** `resolve_module.clusters__online`
-(`@config.when(resolution_mode="online")`): maintains cluster representatives,
-reuses `node_embeddings` + the shared `_verify_pair` helper, orders by `ingest_order`.
+**Deliverables.** A separate `resolve_online_module` defining a `clusters` node:
+greedy incremental matching that maintains cluster representatives, reuses the shared
+embed/verify logic, orders by `ingest_order`. Run as its own flow
+(`run(resolver_module=resolve_online_module, resolution_mode="online")`).
 
 **Tests.**
 - *unit:* with a **stub verifier**, on `mini_graph` the online pass produces a valid
@@ -378,9 +439,10 @@ reuses `node_embeddings` + the shared `_verify_pair` helper, orders by `ingest_o
 **Objective.** Online ingest for freshness, then an offline reconciliation pass that
 re-clusters globally — repairing online's path-dependence.
 
-**Deliverables.** `resolve_module.clusters__hybrid`
-(`@config.when(resolution_mode="hybrid")`): runs `clusters__online`, then applies the
-offline connected-components reconciler over its members.
+**Deliverables.** A separate `resolve_hybrid_module` defining a `clusters` node: runs
+the online pass, then applies the offline connected-components reconciler over its
+members. Run as its own flow (`run(resolver_module=resolve_hybrid_module,
+resolution_mode="hybrid")`).
 
 **Tests.**
 - *unit (the headline):* **convergence** — for the two `ingest_order`s where online
@@ -412,12 +474,15 @@ T0 → T1 → T2 → T2.5                         (T2.5 = library matching probe
         ├→ T3 → T4 ─┐
         ├→ T5 ──────┼→ T6 ─┐
         └→ T7 ←─────┘      ├→ T8 ─┬→ T8.5 ─┐
-                    T7 ────┘      │         ├→ T9 → T10 → T11
+                    T7 ────┘      │         ├→ T9 → T10 → T11 → T11.5 → T12 → T13
+                                  ├→ T11.5 ─┤   (Splink: peer clusterer, reuses T8 shared tail)
                                   ├→ T12 ───┤
-                                  └→ T13 ───┘   (T13 depends on T12; both reuse T8 shared signal)
+                                  └→ T13 ───┘   (T13 depends on T12; all reuse the T8 shared tail)
 ```
 
 T7 (metrics) depends only on fixtures (T1) — build and test it early, before the
 LLM-touching tasks, since it encodes the experiment's correctness criteria. T8 ships
-the shared embed/candidate/verify signal that T12 (online) and T13 (hybrid) reuse, so
-build offline first.
+the shared resolve→cluster tail that **T11.5 (Splink), T12 (online), and T13 (hybrid)
+all reuse** — so build offline first. T11.5 is sequenced before the modes: it's a
+classical *baseline* for the same offline resolution, not a new paradigm, and its
+B-cubed + `llm_calls` metrics sharpen every later mode comparison too.

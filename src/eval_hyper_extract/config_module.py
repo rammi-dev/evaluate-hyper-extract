@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
-ResolutionMode = Literal["offline", "online", "hybrid"]
+ResolutionMode = Literal["offline", "splink", "online", "hybrid"]
 
 
 class Config(BaseModel):

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import mlflow
 
-from eval_hyper_extract import report
+from eval_hyper_extract import report, resolve
 from eval_hyper_extract.config_module import Config
 from eval_hyper_extract.metrics import Metrics
 from eval_hyper_extract.report import fragmentation_rows, verdict_validation  # re-exports for tests
@@ -20,7 +20,20 @@ from eval_hyper_extract.resolve import PairVerdict
 from eval_hyper_extract.schema import Cluster, Graph, GroundTruth
 from eval_hyper_extract.viz_module import render_graph
 
-__all__ = ["fragmentation_rows", "verdict_validation", "verifier_agreement", "final_report"]
+__all__ = ["resolved_graph", "fragmentation_rows", "verdict_validation", "verifier_agreement", "final_report"]
+
+
+def resolved_graph(raw_graph: Graph, clusters: list[Cluster]) -> Graph:
+    """Collapse the raw graph by the resolver's clusters (shared tail — every flow).
+
+    Lives here (a shared module) so offline / Splink / online flows all reuse it; the
+    resolver modules only differ in how they produce `clusters`.
+    """
+    g = resolve.rewrite_graph(raw_graph, clusters)
+    ids = g.node_ids()
+    assert all(e.source != e.target for e in g.edges), "self-edge survived"
+    assert all(e.source in ids and e.target in ids for e in g.edges), "dangling edge endpoint"
+    return g
 
 
 def verifier_agreement(pair_verdicts: list[PairVerdict], raw_graph: Graph, ground_truth: GroundTruth) -> float:

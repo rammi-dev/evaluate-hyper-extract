@@ -170,7 +170,7 @@ combined `dr.execute([...])` per configuration = one MLflow run.
 | `clients_module` | LLM client (OpenRouter `ChatOpenAI`) + local embedder, each behind a fail-fast gate |
 | `corpus_module` | load `data/corpus/*.md` + `data/entities.json` |
 | `extract_module` | build `AutoGraph` from the template, feed corpus → dumped `{nodes, edges}`; also expose the template's resolved `identifiers` key expression |
-| `resolve_module` | external ER: shared embed→candidate→verify, then mode-dispatched cluster (`offline`/`online`/`hybrid`) → rewritten graph |
+| `resolve_module` (+ peer resolver modules) | external ER: shared embed→candidate→verify, then a `clusters` node. **Each resolver is its own module/flow** (offline today; splink/online/hybrid as separate modules), loaded one-per-run; flows are compared in MLflow, not dispatched in-DAG |
 | `metrics_module` | thin scalar nodes (recall/precision/F1/counts/gate) for auto-log |
 | `viz_module` | `render_graph(nodes, edges) -> html` — reusable KG visualization for raw/resolved/online/hybrid graphs |
 | `report_module` | artifacts: viz, fragmentation table, markdown report, `mlflow.log_*` |
@@ -191,7 +191,7 @@ combined `dr.execute([...])` per configuration = one MLflow run.
 | `node_embeddings` | `raw_graph`, `checked_embedder` | `ndarray` | rows == node count; no NaNs |
 | `candidate_pairs` | `node_embeddings`, `config` | `list[Pair]` | all sims ∈ [-1,1]; candidates ⊆ all-pairs (offline) |
 | `verified_pairs` | `candidate_pairs`, `checked_llm` | `list[Pair]` | each verdict ∈ {same, different} + reason |
-| `clusters` | mode-dispatched (`@config.when resolution_mode`): **offline** `raw_graph`,`verified_pairs`; **online/hybrid** `raw_graph`,`node_embeddings`,`checked_llm`,`ingest_order`,`config` | `list[Cluster]` | partition covers every node exactly once |
+| `clusters` | provided by the **loaded resolver module** (one per flow): offline = `raw_graph`,`verified_pairs`; splink/online/hybrid define their own `clusters` in their own module | `list[Cluster]` | partition covers every node exactly once |
 | `resolved_graph` | `raw_graph`, `clusters` | `Graph` | no self-edges; every edge endpoint ∈ node ids |
 | `resolved_metrics` | `resolved_graph`, `clusters`, `ground_truth` | `Metrics` | **HARD: no lookalike pair co-clustered** |
 | `recall` / `precision` / `f1` | `resolved_metrics` | `float` | scalar (auto-logs as metric) |
@@ -203,10 +203,14 @@ The `resolved_metrics` lookalike assert is the **primary hard gate**: a failing
 node raises and halts downstream — a run that over-merges a known-distinct pair
 cannot silently report a good F1.
 
-`resolution_mode` selects the `clusters` implementation via `@config.when` (one
-driver build per mode); `ingest_order` is a plain input (a permutation seed for
-online/hybrid, ignored by offline). Both are also surfaced as MLflow params/tags so
-each `(mode, order)` run is comparable in the UI.
+**Separate flows, compared in MLflow.** There is no in-DAG mode switch. Each resolver
+is its own module that defines a `clusters` node; a flow = the shared modules + one
+resolver module (`run(resolver_module=...)`). You run each flow separately — one
+`dr.execute` = one MLflow run — and compare runs in the UI. `resolution_mode` is just
+a **logged label** (run name/tag), and `ingest_order` a plain input (online/hybrid
+seed). **Inputs are parameterized** (`corpus_dir`, `entities_path`, `template_path`,
+model/threshold) so any flow runs on a different or bigger dataset without code
+changes.
 
 ## 4. The external resolver (resolve_module) — shared signal + three modes
 
@@ -245,7 +249,7 @@ Why not pure vectors: `P-101`/`P-102` embed as near-identical but are distinct
 Candidate-generate over **all** node pairs, verify each, then take **connected
 components** over confirmed-same pairs (singletons kept). Sees the whole pile →
 global, transitive, **order-independent** clustering. Highest accuracy; the headline
-"after". Selected by `resolution_mode="offline"`.
+"after". The current `resolve_module` flow.
 
 ### 4.2 Online (incremental, semantic) — order-dependent
 
@@ -254,18 +258,16 @@ for each incoming node, candidate-match it against the **clusters-so-far** (comp
 to each cluster's representative embedding), LLM-verify against the best candidate,
 then **link** (merge in, update representative) or **mint** a new cluster — decision
 committed immediately. Fresh and low-latency, but **greedy and order-dependent**: an
-early wrong link entrenches and is never revisited. Selected by
-`resolution_mode="online"`. This is the only mode that exhibits the
-order-dependence the reference warns about — `==` matching does **not** (byte-equal
-keys bucket deterministically regardless of order).
+early wrong link entrenches and is never revisited. Its own resolver module/flow.
+This is the only mode that exhibits the order-dependence the reference warns about —
+`==` matching does **not** (byte-equal keys bucket deterministically regardless of order).
 
 ### 4.3 Hybrid — online freshness + offline reconciliation
 
 Run **online** (4.2) for the incremental graph, then run an **offline reconciliation
 pass** (4.1 connected-components) over the online clusters' members to repair
 path-dependence and recover global structure. Converges to ≈the offline result while
-modelling what mature systems do (Graphiti, Senzing). Selected by
-`resolution_mode="hybrid"`.
+modelling what mature systems do (Graphiti, Senzing). Its own resolver module/flow.
 
 ### 4.4 The library's native online-`==` — the raw baseline
 
@@ -347,8 +349,9 @@ via `config`/`inputs`, so auto-logged as params):
 - `llm_model` — OpenRouter id (e.g. `google/gemini-2.5-flash`,
   `openai/gpt-4o-mini`).
 - `embed_model` — `BAAI/bge-m3` (default) vs `BAAI/bge-small-en-v1.5` (faster).
-- `resolution_mode` — `offline` / `online` / `hybrid` (§4). Compare accuracy
-  (offline ≥ hybrid ≥ online) against freshness on the same metrics.
+- **resolver flow** — run each separately (`offline`, `splink`, `online`, `hybrid`),
+  each its own module/run; compare accuracy vs freshness vs cost across the runs in
+  the MLflow UI. Not a swept config knob — a separate `run(resolver_module=...)`.
 - `ingest_order` — permutation seed; sweeping ≥2 orders exposes online's
   order-dependence and offline/hybrid's stability.
 - `library_key` — the template's `identifiers.entity_id`: `name` vs the composite

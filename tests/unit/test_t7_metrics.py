@@ -96,11 +96,24 @@ def test_resolved_metrics_passes_clean(mini_graph: Graph, ground_truth: GroundTr
     assert m.recall == 1.0 and m.lookalike_preserved is True
 
 
-def test_resolved_metrics_hard_gate_raises(mini_graph: Graph, ground_truth: GroundTruth) -> None:
-    with pytest.raises(AssertionError, match="HARD GATE"):
-        resolved_metrics(mini_graph, _clusters(A + B, C), ground_truth)
+def test_resolved_metrics_flags_overmerge_for_disqualification(mini_graph: Graph, ground_truth: GroundTruth) -> None:
+    from eval_hyper_extract.metrics_module import is_disqualified
+
+    m = resolved_metrics(mini_graph, _clusters(A + B, C), ground_truth)  # over-merged lookalike
+    assert m.lookalike_preserved is False
+    assert is_disqualified(m) is True  # assessment-time gate, not a crash
+    # a clean clustering is not disqualified
+    assert is_disqualified(resolved_metrics(mini_graph, _clusters(A, B, C), ground_truth)) is False
 
 
 def test_scalar_counts(mini_graph: Graph) -> None:
     assert raw_node_count(mini_graph) == 7
     assert resolved_node_count(_clusters(A, B, C)) == 3
+
+
+def test_bcubed_perfect_and_overmerge(mini_graph: Graph, ground_truth: GroundTruth) -> None:
+    from eval_hyper_extract.metrics import bcubed
+
+    assert bcubed(mini_graph.nodes, _clusters(A, B, C), ground_truth) == (1.0, 1.0, 1.0)
+    bp, br, _ = bcubed(mini_graph.nodes, _clusters(A + B, C), ground_truth)  # over-merged lookalike
+    assert bp < 1.0 and br == 1.0  # B-cubed precision drops, recall intact

@@ -8,7 +8,6 @@ re-exported for tests; Hamilton ignores them (defined in `resolve`, not here).
 from __future__ import annotations
 
 import numpy as np
-from hamilton.function_modifiers import config
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 
@@ -34,7 +33,7 @@ __all__ = [
     "build_clusters", "confirm_pairs", "connected_components", "embed_nodes",
     "rewrite_graph", "verify_all_pairs", "verify_pair",
     "node_embeddings", "candidate_pairs", "pair_verdicts", "verified_pairs",
-    "clusters__offline", "resolved_graph",
+    "clusters",
 ]
 
 
@@ -64,12 +63,12 @@ def verified_pairs(pair_verdicts: list[PairVerdict]) -> list[ConfirmedPair]:
     return [ConfirmedPair(v.a, v.b, v.reason) for v in pair_verdicts if v.same]
 
 
-@config.when(resolution_mode="offline")
-def clusters__offline(raw_graph: Graph, verified_pairs: list[ConfirmedPair]) -> list[Cluster]:
-    """Offline (batch): connected components over all confirmed-same pairs.
+def clusters(raw_graph: Graph, verified_pairs: list[ConfirmedPair]) -> list[Cluster]:
+    """Offline (batch) clusterer: connected components over all confirmed-same pairs.
 
-    `@config.when(resolution_mode="offline")` makes this the `clusters` node when the
-    driver is built with `resolution_mode="offline"`. Online/hybrid join it in T12/T13.
+    This module IS the offline flow's resolver. Other resolvers (Splink, online,
+    hybrid) live in their own modules and each define their own `clusters` node; a
+    flow loads exactly one resolver module, and the flows are compared in MLflow.
     """
     clusters = resolve.build_clusters(raw_graph.nodes, verified_pairs)
     covered = [nid for c in clusters for nid in c.node_ids]
@@ -77,9 +76,5 @@ def clusters__offline(raw_graph: Graph, verified_pairs: list[ConfirmedPair]) -> 
     return clusters
 
 
-def resolved_graph(raw_graph: Graph, clusters: list[Cluster]) -> Graph:
-    g = resolve.rewrite_graph(raw_graph, clusters)
-    ids = g.node_ids()
-    assert all(e.source != e.target for e in g.edges), "self-edge survived"
-    assert all(e.source in ids and e.target in ids for e in g.edges), "dangling edge endpoint"
-    return g
+# `resolved_graph` is the shared tail (lives in report_module) so every resolver flow
+# reuses it — resolver modules differ only in how they produce `clusters`.

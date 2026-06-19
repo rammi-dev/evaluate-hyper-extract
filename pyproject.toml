@@ -17,6 +17,7 @@ dependencies = [
     "pyvis",
     "hyperextract",
     "ontomem",
+    "splink>=4.0.16",
 ]
 
 [dependency-groups]
