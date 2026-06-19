@@ -61,4 +61,39 @@ fig.savefig("out/before_after.png", dpi=120)
 table = json.loads(Path("out/fragmentation_table.json").read_text())
 print(f"nodes {raw_n} -> {res_n} | raw recall {raw[0]:.2f} -> resolved {res[0]:.2f}")
 print("fragmentation:", table)
-print("wrote out/dag.png, out/before_after.png")
+
+# --- the two knowledge graphs, raw vs resolved (static, embeddable) -----------------
+import networkx as nx  # noqa: E402
+
+
+def _draw(ax, graph: dict, title: str, resolved: bool) -> None:
+    g = nx.DiGraph()
+    labels, colors = {}, []
+    for n in graph["nodes"]:
+        merged = [a for a in n.get("aliases", []) if a != n["name"]]
+        g.add_node(n["name"])
+        labels[n["name"]] = f"{n['name']}\n(+{len(merged)})" if merged else n["name"]
+    for e in graph["edges"]:
+        if e["source"] in g and e["target"] in g:
+            g.add_edge(e["source"], e["target"])
+    for n in graph["nodes"]:
+        merged = [a for a in n.get("aliases", []) if a != n["name"]]
+        colors.append("#27ae60" if (resolved and merged) else ("#9fd9b0" if resolved else "#e08a82"))
+    pos = nx.spring_layout(g, seed=7, k=1.1)
+    nx.draw_networkx_edges(ax=ax, G=g, pos=pos, edge_color="#bbbbbb", arrowsize=8, width=0.8)
+    nx.draw_networkx_nodes(ax=ax, G=g, pos=pos, node_color=colors, node_size=900, edgecolors="#555")
+    nx.draw_networkx_labels(ax=ax, G=g, pos=pos, labels=labels, font_size=6)
+    ax.set_title(title, fontweight="bold")
+    ax.axis("off")
+
+
+raw_g = json.loads(Path("out/raw_graph.json").read_text())
+res_g = json.loads(Path("out/resolved_graph.json").read_text())
+fig, axes = plt.subplots(1, 2, figsize=(15, 7.5))
+_draw(axes[0], raw_g, f"RAW — Hyper-Extract == matching ({raw_n} nodes, fragmented)", resolved=False)
+_draw(axes[1], res_g, f"RESOLVED — after external ER ({res_n} nodes; green = merged variants)", resolved=True)
+fig.suptitle("Same extraction, different matching — variant nodes collapse, look-alikes stay split", fontweight="bold")
+fig.tight_layout()
+fig.savefig("out/raw_vs_resolved_graph.png", dpi=130)
+
+print("wrote out/dag.png, out/before_after.png, out/raw_vs_resolved_graph.png")

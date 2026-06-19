@@ -12,6 +12,7 @@ dependencies = [
     "sentence-transformers",
     "numpy",
     "matplotlib",
+    "networkx",
     "python-dotenv",
     "pyvis",
     "hyperextract",
