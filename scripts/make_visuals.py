@@ -19,14 +19,19 @@ import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
 
-from eval_hyper_extract.run import EXPERIMENT, TRACKING_URI, build_driver
+from eval_hyper_extract import resolve_module
+from eval_hyper_extract.run import TRACKING_URI, build_driver
 
 # --- DAG (static render; does not execute nodes, so no LLM/embedder calls) ----------
-build_driver("offline", with_mlflow=False).display_all_functions("out/dag.png", orient="TB")
+build_driver(resolve_module, with_mlflow=False).display_all_functions("out/dag.png", orient="TB")
 
-# --- pull the latest run's metrics --------------------------------------------------
+# --- latest OFFLINE run (the before/after visual is the offline story) ---------------
 mlflow.set_tracking_uri(TRACKING_URI)
-runs = mlflow.search_runs(experiment_names=[EXPERIMENT], order_by=["start_time DESC"])
+runs = mlflow.search_runs(search_all_experiments=True, order_by=["start_time DESC"])
+runs = runs[runs["metrics.b3_f1"].notna()]
+if "tags.resolution_mode" in runs.columns:
+    offline = runs[runs["tags.resolution_mode"] == "offline"]
+    runs = offline if len(offline) else runs
 m = runs.iloc[0]
 raw_n, res_n = int(m["metrics.raw_node_count"]), int(m["metrics.resolved_node_count"])
 raw = [m["metrics.raw_recall"], m["metrics.raw_precision"], m["metrics.raw_f1"]]

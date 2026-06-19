@@ -28,6 +28,29 @@ Hyper-Extract extraction → external entity resolution (embed → candidate →
 `entities_path`, `template_path`, model/threshold) are parameterized, so any flow runs
 on a different/bigger dataset without code changes.
 
+## Running flows & experiments
+
+Each flow logs to its **own MLflow experiment** (`eval-<mode>`); a comparison is a
+**deliberate, separate experiment** you populate by passing `experiment=`.
+
+```python
+from eval_hyper_extract.run import run
+from eval_hyper_extract import resolve_splink_module as splink
+
+run()                                                              # -> experiment "eval-offline"
+run(resolver_module=splink, resolution_mode="splink",
+    match_probability_threshold=0.9)                               # -> experiment "eval-splink"
+
+# a head-to-head comparison in one experiment:
+run(experiment="compare")                                          # offline -> "compare"
+run(resolver_module=splink, resolution_mode="splink",
+    match_probability_threshold=0.9, experiment="compare")         # splink  -> "compare"
+```
+
+Browse: `uv run mlflow ui --backend-store-uri sqlite:///out/mlflow.db`, pick the
+experiment in the dropdown. (Pre-split runs live in the legacy `evaluate-hyper-extract`
+experiment.) Visuals: `uv run python scripts/make_visuals.py`.
+
 ## Done
 
 T0 scaffold · T1 fixtures · T2 data assets · T3 config · T4 clients · T5 corpus ·

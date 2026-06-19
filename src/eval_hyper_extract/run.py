@@ -54,8 +54,23 @@ TERMINAL = [
 
 TRACKING_URI = "sqlite:///out/mlflow.db"
 ARTIFACT_LOCATION = "out/mlartifacts"
-EXPERIMENT = "evaluate-hyper-extract"
 LLM_CACHE_PATH = "out/llm_cache.db"
+
+
+def experiment_for(mode: str) -> str:
+    """Default MLflow experiment per flow — each resolver is its own experiment."""
+    return f"eval-{mode}"
+
+
+def run_name_for(mode: str, inputs: dict) -> str:
+    """A run name showing the knob that actually matters for this flow.
+
+    Splink is tuned by `match_probability_threshold` (and never touches the embedding
+    `tau` or the LLM verifier); the LLM flows are tuned by `tau` + the model.
+    """
+    if mode == "splink":
+        return f"splink | mp={inputs.get('match_probability_threshold', '?')}"
+    return f"{mode} | tau={inputs['tau_candidate']} | {inputs['llm_model']}"
 
 
 def enable_llm_cache(path: str = LLM_CACHE_PATH) -> None:
@@ -92,8 +107,9 @@ def default_inputs(**overrides) -> dict:
     return base
 
 
-def build_driver(resolver_module=resolve_module, *, with_mlflow: bool = True, llm_cache: bool = True, run_name=None, run_tags=None):
-    """Assemble a flow = SHARED_MODULES + one resolver module."""
+def build_driver(resolver_module=resolve_module, *, with_mlflow: bool = True, llm_cache: bool = True,
+                 experiment_name: str = "eval-offline", run_name=None, run_tags=None):
+    """Assemble a flow = SHARED_MODULES + one resolver module, logging to `experiment_name`."""
     if llm_cache:
         enable_llm_cache()
     if with_mlflow:
@@ -109,7 +125,7 @@ def build_driver(resolver_module=resolve_module, *, with_mlflow: bool = True, ll
             MLFlowTracker(
                 tracking_uri=TRACKING_URI,
                 artifact_location=ARTIFACT_LOCATION,
-                experiment_name=EXPERIMENT,
+                experiment_name=experiment_name,
                 run_name=run_name,
                 run_tags=run_tags or {},
             )
@@ -117,32 +133,37 @@ def build_driver(resolver_module=resolve_module, *, with_mlflow: bool = True, ll
     return builder.build()
 
 
-def run(resolver_module=resolve_module, *, with_mlflow: bool = True, llm_cache: bool = True, **overrides) -> dict:
+def run(resolver_module=resolve_module, *, with_mlflow: bool = True, llm_cache: bool = True,
+        experiment: str | None = None, **overrides) -> dict:
     """Run ONE flow end-to-end; appends a new MLflow run (history is never deleted).
 
-    `resolver_module` selects the flow (default: the offline LLM resolver). `overrides`
-    set inputs — e.g. `run(corpus_dir="data/big", entities_path="data/big.json")`.
-    With `llm_cache=True` (default) repeated runs of the same config are reproducible.
+    `resolver_module` selects the flow (default: the offline LLM resolver). Each flow
+    logs to its OWN experiment (`eval-<mode>`) by default; pass `experiment=` to log
+    elsewhere — e.g. `experiment="compare"` to gather offline + splink runs side by
+    side. `overrides` set inputs (corpus/entities/template/model/threshold).
     """
     inputs = default_inputs(**overrides)
     mode = inputs["resolution_mode"]
-    run_name = f"{mode} | tau={inputs['tau_candidate']} | {inputs['llm_model']}"
+    run_name = run_name_for(mode, inputs)
     dr = build_driver(
         resolver_module, with_mlflow=with_mlflow, llm_cache=llm_cache,
+        experiment_name=experiment or experiment_for(mode),
         run_name=run_name, run_tags={"resolution_mode": mode},
     )
     return dr.execute(TERMINAL, inputs=inputs)
 
 
 def sweep(configs: list[dict]) -> None:
-    """Run several flows/configs; each appends one comparable MLflow run.
+    """Run several flows/configs; each appends one MLflow run.
 
-    Each dict may carry `resolver_module` (to switch flow) plus input overrides, e.g.
+    Each dict may carry `resolver_module` (switch flow), `experiment` (where to log —
+    e.g. a shared "compare" experiment), plus input overrides, e.g.
     `sweep([{"tau_candidate": 0.45}, {"tau_candidate": 0.65}])`.
     """
     for cfg in configs:
         resolver_module = cfg.pop("resolver_module", resolve_module)
-        result = run(resolver_module, **cfg)
+        experiment = cfg.pop("experiment", None)
+        result = run(resolver_module, experiment=experiment, **cfg)
         print(f"[{result.get('resolution_mode', '')} {cfg}] -> recall {result['recall']:.2f} | "
               f"nodes {result['raw_node_count']}->{result['resolved_node_count']} | "
               f"lookalike_preserved {result['lookalike_preserved']}")
