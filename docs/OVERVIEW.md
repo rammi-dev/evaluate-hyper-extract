@@ -1,13 +1,11 @@
 # evaluate-hyper-extract — what this is and how to look at it
 
 A visual, plain-language tour of what was built and why. For the full design see
-[design.md](design.md); for the task-by-task plan see
-[implementation-plan.md](implementation-plan.md); for verified library facts see
-[implementation.md](implementation.md).
+[design.md](design.md)
 
 ## The goal (not "extract a knowledge graph")
 
-The goal was to **expose and fix the one defect that silently decides graph quality**.
+The goal was to **analyze and try to fix the one defect that silently decides graph quality**.
 Hyper-Extract / ontomem does extraction and field-fusion with an LLM, but it does
 **matching** — deciding which mentions are the *same* entity — with a string-equality
 `==` on the entity key (`ontomem...BaseMerger._group_by_key`, a `defaultdict[key]`).
